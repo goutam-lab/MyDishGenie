@@ -1,60 +1,50 @@
-// app/api/chef-chat/route.ts
 import { type NextRequest, NextResponse } from "next/server";
+import OpenAI from 'openai';
 
 export const dynamic = 'force-dynamic';
 
+// Initialize the OpenAI client to use the OpenRouter API
+const openrouter = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "https://mydishgenie.vercel.app", // Replace with your actual deployed URL
+    "X-Title": "MyDishGenie",
+  },
+});
+
 interface HistoryItem {
-    role: 'user' | 'model';
-    parts: { text: string }[];
+    role: 'user' | 'assistant';
+    content: string;
 }
 
 export async function POST(request: NextRequest) {
-    if (!process.env.GEMINI_API_KEY) {
-        return NextResponse.json({ error: "Server configuration error: Gemini API key is not set." }, { status: 500 });
+    if (!process.env.OPENROUTER_API_KEY) {
+        return NextResponse.json({ error: "Server configuration error: OpenRouter API key is not set." }, { status: 500 });
     }
 
     try {
         const { history } = await request.json();
 
-        const apiKey = process.env.GEMINI_API_KEY;
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
-
-        // Format the history for the Gemini API
+        // Format the history for the OpenAI SDK
         const formattedHistory: HistoryItem[] = history.map((msg: { role: 'user' | 'model', text: string }) => ({
-            role: msg.role,
-            parts: [{ text: msg.text }],
+            role: msg.role === 'model' ? 'assistant' : 'user',
+            content: msg.text,
         }));
 
-        const payload = {
-            contents: [
-                // System instruction / context
-                {
-                    role: "user",
-                    parts: [{ text: "You are an expert Indian chef assistant named MyDishGenie. Your goal is to help users with their cooking questions. Keep your answers concise, friendly, and helpful. Focus on Indian cuisine." }]
-                },
-                {
-                    role: "model",
-                    parts: [{ text: "Yes, I am MyDishGenie! How can I help you in the kitchen today?" }]
-                },
-                // Actual conversation history
+        const completion = await openrouter.chat.completions.create({
+            model: "google/gemini-flash-1.5", // --- FIX: Correct model name ---
+            messages: [
+                { role: "system", content: "You are an expert Indian chef assistant named MyDishGenie. Your goal is to help users with their cooking questions. Keep your answers concise, friendly, and helpful. Focus on Indian cuisine." },
                 ...formattedHistory
             ],
-        };
-
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
         });
 
-        if (!response.ok) {
-            const errorBody = await response.text();
-            console.error("Gemini API Error:", errorBody);
-            throw new Error(`Gemini API request failed with status ${response.status}`);
-        }
+        const botResponse = completion.choices[0].message?.content;
 
-        const result = await response.json();
-        const botResponse = result.candidates[0].content.parts[0].text;
+        if (!botResponse) {
+            throw new Error("AI did not return a valid response.");
+        }
 
         return NextResponse.json({ response: botResponse });
 

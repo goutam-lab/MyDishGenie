@@ -1,8 +1,19 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { adminDb } from "@/lib/firebase-admin"; // Import the admin DB instance
+import { adminDb } from "@/lib/firebase-admin";
+import OpenAI from 'openai';
 
 // This tells Next.js to always run this function dynamically and not cache the result.
 export const dynamic = 'force-dynamic'
+
+// Initialize the OpenAI client to use the OpenRouter API
+const openrouter = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "https://mydishgenie.vercel.app", // Replace with your actual deployed URL
+    "X-Title": "MyDishGenie",
+  },
+});
 
 // Helper function to safely convert string times to minutes
 const timeToMinutes = (timeString: string): number => {
@@ -17,7 +28,6 @@ const timeToMinutes = (timeString: string): number => {
             } else if (parts[i+1] && (parts[i+1].includes('minute') || parts[i+1].includes('min'))) {
                 totalMinutes += value;
             } else {
-                // If no unit is specified, assume minutes
                 totalMinutes += value;
             }
         }
@@ -27,138 +37,81 @@ const timeToMinutes = (timeString: string): number => {
 
 
 export async function POST(request: NextRequest) {
-  // --- Environment Variable Check ---
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-    console.error("Firebase Admin SDK service account key is not set in .env.local");
-    return NextResponse.json({ error: "Server configuration error: Firebase Admin SDK credentials are not set." }, { status: 500 });
-  }
-  if (!process.env.GEMINI_API_KEY) {
-    console.error("Gemini API key is not set in .env.local");
-    return NextResponse.json({ error: "Server configuration error: Gemini API key is not set." }, { status: 500 });
+  if (!process.env.OPENROUTER_API_KEY) {
+    return NextResponse.json({ error: "Server configuration error: OpenRouter API key is not set." }, { status: 500 });
   }
   
-  let filteredDishes: any[] = []; // Define here to access in catch block
+  let filteredDishes: any[] = [];
+  let mealType = "Dinner"; // Default value
 
   try {
-    const { userProfile, mealType } = await request.json()
+    const body = await request.json();
+    const { userProfile } = body;
+    mealType = body.mealType; // Assign mealType from request
 
-    // --- Step 1: Build a more efficient Firestore query ---
-    let recipesQuery: FirebaseFirestore.Query = adminDb.collection("recipes");
-
-    // Pre-filter by diet in the database, as it's a very selective filter.
-    if (userProfile.dietaryRestrictions?.includes('Vegetarian')) {
-        recipesQuery = recipesQuery.where('diet', '==', 'Vegetarian');
-    }
-    
-    recipesQuery = recipesQuery.limit(500);
-
-    const recipesSnapshot = await recipesQuery.get();
+    const recipesCollectionRef = adminDb.collection("recipes");
+    const recipesSnapshot = await recipesCollectionRef.get();
     const dishDatabase = recipesSnapshot.docs.map(doc => doc.data());
 
     if (dishDatabase.length === 0) {
-        throw new Error("No recipes found in the database matching your core preferences.");
+        throw new Error("No recipes found in the database.");
     }
 
-    // Step 2: Perform the remaining, more complex filtering in-memory
     filteredDishes = dishDatabase.filter((dish: any) => {
         const mealTypeMatch = dish.course && typeof dish.course === 'string' && dish.course.toLowerCase().includes(mealType.toLowerCase());
-        
         const dietaryMatch = (userProfile.dietaryRestrictions || []).every((restriction: string) => {
             if (!dish.diet || typeof dish.diet !== 'string') return true;
-            if (restriction === "vegan") {
-                return dish.diet.toLowerCase() === 'vegetarian' && !dish.ingredients.toLowerCase().includes('ghee') && !dish.ingredients.toLowerCase().includes('yogurt');
-            }
-            if (restriction === "vegetarian") {
-                return dish.diet.toLowerCase() === 'vegetarian';
+            if (restriction === "vegetarian" || restriction === "vegan") {
+                return dish.diet.toLowerCase() === restriction;
             }
             return true;
         });
-
         let maxCookingTime = Infinity;
         if (userProfile.cookingTime === "quick") maxCookingTime = 30;
         if (userProfile.cookingTime === "moderate") maxCookingTime = 60;
-        
         const totalCookTime = timeToMinutes(dish.prep_time) + timeToMinutes(dish.cook_time);
         const timeMatch = totalCookTime <= maxCookingTime;
-
         return mealTypeMatch && dietaryMatch && timeMatch;
     });
 
-    // Step 3: Create enhanced AI prompt for Gemini
     const prompt = `
     You are MyDishGenie, an expert Indian cuisine recommendation AI. Analyze the user profile and recommend 3 perfect dishes from the filtered database.
 
     USER PROFILE:
-    - Name: ${userProfile.name}
     - Favorite Cuisines: ${(userProfile.favoriteCuisines || []).join(", ")}
     - Dietary Restrictions: ${(userProfile.dietaryRestrictions || []).join(", ")}
     - Cooking Time Available: ${userProfile.cookingTime}
-
-    CURRENT CONTEXT:
     - Meal Type: ${mealType}
 
-    FILTERED COMPATIBLE DISHES (A selection of ${filteredDishes.length} dishes):
+    FILTERED DISHES:
     ${JSON.stringify(filteredDishes.slice(0, 50), null, 2)} 
 
-    Please recommend exactly 3 dishes from the provided list. For each dish, provide:
-    {
-      "id": "a-unique-id-from-the-dish-name",
-      "name": "name from the dataset",
-      "cuisine": "cuisine from the dataset",
-      "mealType": "${mealType}",
-      "cookingTime": "prep_time + cook_time",
-      "spiceLevel": "medium", 
-      "difficulty": "easy",
-      "rating": 4.5,
-      "description": "description from the dataset",
-      "ingredients": ["An", "array", "of", "string", "ingredients"],
-      "instructions": "instructions from the dataset",
-      "reason": "A personalized explanation of why this dish is perfect for this specific user.",
-      "image_url": "image_url from the dataset"
-    }
-
-    Respond with a valid JSON array of exactly 3 dish objects. Ensure the ingredients are a JSON array of strings and that the instructions are included.
+    Please recommend exactly 3 dishes from the provided list. Respond with a valid JSON array of 3 objects with these exact keys: "id", "name", "cuisine", "mealType", "cookingTime", "spiceLevel", "difficulty", "rating", "description", "ingredients" (as an array of strings), "instructions", "reason", "image_url".
     `;
 
-    // --- Step 4: Generate AI recommendations using Gemini ---
-    const apiKey = process.env.GEMINI_API_KEY;
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
-
-    const payload = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-            response_mime_type: "application/json",
-        },
-    };
-
-    const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+    const completion = await openrouter.chat.completions.create({
+      model: "google/gemini-flash-1.5", // --- FIX: Correct model name ---
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" }, 
     });
 
-    if (!response.ok) {
-        const errorBody = await response.text();
-        console.error("Gemini API Error:", errorBody);
-        throw new Error(`Gemini API request failed with status ${response.status}`);
+    const recommendationsText = completion.choices[0].message?.content;
+    if (!recommendationsText) {
+        throw new Error("AI did not return a valid response.");
     }
-
-    const result = await response.json();
-    const recommendationsText = result.candidates[0].content.parts[0].text;
+    
+    // The model is instructed to return a JSON array, so we parse it directly.
     const recommendations = JSON.parse(recommendationsText);
 
-    return NextResponse.json(recommendations)
+    return NextResponse.json(recommendations);
 
   } catch (error: any) {
     console.error("Error generating AI recommendations:", error);
-    
-    // --- Smart Fallback System ---
     if (filteredDishes.length > 0) {
-        console.log("AI failed. Returning fallback recommendations from filtered list.");
         const fallbackRecommendations = filteredDishes
-            .sort(() => 0.5 - Math.random()) // Shuffle the array
-            .slice(0, 3) // Get the first 3
-            .map((dish: any) => ({ // Format them to match the AI output
+            .sort(() => 0.5 - Math.random())
+            .slice(0, 3)
+            .map((dish: any) => ({
                 id: dish.name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase(),
                 name: dish.name,
                 cuisine: dish.cuisine,
