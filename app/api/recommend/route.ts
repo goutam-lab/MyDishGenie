@@ -7,6 +7,7 @@ export const dynamic = 'force-dynamic'
 
 // Helper function to safely convert string times to minutes
 const timeToMinutes = (timeString: string): number => {
+    // [Keep the timeToMinutes function exactly as it was]
     if (!timeString) return Infinity;
     const parts = timeString.toLowerCase().split(' ');
     let totalMinutes = 0;
@@ -18,12 +19,10 @@ const timeToMinutes = (timeString: string): number => {
             } else if (parts[i+1] && (parts[i+1].includes('minute') || parts[i+1].includes('min'))) {
                 totalMinutes += value;
             } else {
-                // Assume minutes if no unit specified after number
                 totalMinutes += value;
             }
         }
     }
-    // If parsing failed or resulted in 0, treat as Infinity to avoid filtering out valid long recipes
     return totalMinutes > 0 ? totalMinutes : Infinity;
 };
 
@@ -44,18 +43,15 @@ export async function POST(request: NextRequest) {
 
     try {
         // --- Step 1: Try to fetch and filter from Firestore ---
+        // [Keep the Firestore fetch and filtering logic exactly as it was]
         let recipesQuery: FirebaseFirestore.Query = adminDb.collection("recipes");
 
-        // --- Improved Filtering Logic ---
         if (userProfile.dietaryRestrictions?.includes('Vegetarian')) {
             recipesQuery = recipesQuery.where('diet', '==', 'Vegetarian');
         } else if (userProfile.dietaryRestrictions?.includes('Vegan')) {
              recipesQuery = recipesQuery.where('diet', '==', 'Vegan');
         }
-        // Add more filters as needed
-
         recipesQuery = recipesQuery.limit(500);
-
         const recipesSnapshot = await recipesQuery.get();
         const dishDatabase = recipesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
@@ -63,17 +59,12 @@ export async function POST(request: NextRequest) {
             console.warn("No recipes found in initial Firestore query.");
         }
 
-        // --- More Robust Client-Side Filtering ---
         filteredDishes = dishDatabase.filter((dish: any) => {
             const course = dish.course?.toLowerCase() || '';
             const mealTypeLower = mealType.toLowerCase();
             let mealTypeMatch = course.includes(mealTypeLower);
-            if (!mealTypeMatch && (mealTypeLower === 'lunch' || mealTypeLower === 'dinner') && course.includes('main course')) {
-                mealTypeMatch = true;
-            }
-            if (!mealTypeMatch && mealTypeLower === 'snacks' && (course.includes('snack') || course.includes('appetizer'))) {
-                 mealTypeMatch = true;
-            }
+            if (!mealTypeMatch && (mealTypeLower === 'lunch' || mealTypeLower === 'dinner') && course.includes('main course')) mealTypeMatch = true;
+            if (!mealTypeMatch && mealTypeLower === 'snacks' && (course.includes('snack') || course.includes('appetizer'))) mealTypeMatch = true;
 
             let maxCookingTime = Infinity;
             if (userProfile.cookingTime === "quick") maxCookingTime = 30;
@@ -82,29 +73,23 @@ export async function POST(request: NextRequest) {
             const prepTime = timeToMinutes(dish.prep_time);
             const cookTime = timeToMinutes(dish.cook_time);
             const totalCookTime = (prepTime === Infinity ? 0 : prepTime) + (cookTime === Infinity ? 0 : cookTime);
-            const timeMatch = maxCookingTime === Infinity || (totalCookTime > 0 && totalCookTime <= maxCookingTime);
-
+            const timeMatch = maxCookingTime === Infinity || (totalCookTime > 0 && totalCookTime <= maxCookingTime) || totalCookTime === 0;
 
             let allergyMatch = true;
             if (userProfile.allergies && dish.ingredients) {
                  const allergiesLower = userProfile.allergies.toLowerCase().split(',').map((a: string) => a.trim()).filter(Boolean);
-                 const ingredientsString = (Array.isArray(dish.ingredients) ? dish.ingredients.join(', ') : dish.ingredients).toLowerCase();
-                 if (allergiesLower.some((allergy: string) => ingredientsString.includes(allergy))) {
-                     allergyMatch = false;
-                 }
+                 const ingredientsString = (Array.isArray(dish.ingredients) ? dish.ingredients.join(', ') : String(dish.ingredients)).toLowerCase();
+                 if (allergiesLower.some((allergy: string) => ingredientsString.includes(allergy))) allergyMatch = false;
             }
             return mealTypeMatch && timeMatch && allergyMatch;
         });
 
-        if (filteredDishes.length < 3) {
-             console.warn(`Only found ${filteredDishes.length} dishes after filtering. May need fallback.`);
-             if (filteredDishes.length === 0) {
-                 throw new Error("No recipes found after filtering. Triggering fallback.");
-             }
+        if (filteredDishes.length === 0) {
+             throw new Error("No recipes found after filtering. Triggering fallback.");
         }
 
+
         // --- Prompt using the database ---
-        // Ensure the entire prompt string is enclosed in ONE pair of backticks
         prompt = `
 You are MyDishGenie, an expert Indian cuisine recommendation AI. Analyze the user profile and the provided filtered list of potential dishes. Your goal is to select the 3 BEST matches for the user for the specified meal type.
 
@@ -135,13 +120,12 @@ INSTRUCTIONS:
 8.  Estimate "difficulty" (easy, medium, hard) and "rating" (1-5) if not present in the data, based on the recipe. Assign a sensible default spice level if missing. Ensure cookingTime reflects prep + cook time.
 
 Respond ONLY with the JSON array.
-`; // <-- Make sure the final backtick is here
+`;
 
     } catch (dbError: any) {
         console.warn("Firestore operation failed or insufficient results. Switching to database-free AI generation.", dbError.message);
 
         // --- Fallback Prompt without the database ---
-        // Ensure the entire prompt string is enclosed in ONE pair of backticks
         prompt = `
 You are MyDishGenie, an expert Indian cuisine recommendation AI. Your primary recipe database is currently unavailable or returned too few results.
 Please generate 3 creative and delicious Indian recipe ideas from your own knowledge that perfectly match the user's profile for the specified meal type.
@@ -182,7 +166,7 @@ INSTRUCTIONS:
       "image_url": "https://placehold.co/400x300/FFEDD5/8C2D0D?text=AI+Generated" // Placeholder URL
     }
 6.  Ensure the response contains ONLY the valid JSON array.
-`; // <-- Make sure the final backtick is here
+`;
     }
 
 
@@ -198,7 +182,8 @@ INSTRUCTIONS:
 
     try {
         const completion = await openrouter.chat.completions.create({
-            model: "google/gemini-pro-1.5:free",
+            // ** USE THIS MODEL NAME **
+            model: "google/gemini-2.0-flash-exp:free",
             messages: [{ role: "user", content: prompt }],
             response_format: { type: "json_object" },
         });
@@ -232,19 +217,20 @@ INSTRUCTIONS:
 
         } catch (parseError: any) {
             console.error("Failed to parse AI response JSON:", recommendationsText);
-            throw new Error(`Failed to parse AI response: ${parseError.message}`);
+            throw new Error(`Failed to parse AI response: ${parseError.message}. Raw response: ${recommendationsText}`);
         }
 
         return NextResponse.json(recommendations);
 
      } catch (aiError: any) {
         console.error("Error calling OpenRouter API:", aiError);
-        const details = aiError.response?.data?.error?.message || aiError.message;
+        const details = aiError.response?.data?.error?.message || aiError.message || 'Unknown API error';
         throw new Error(`AI API call failed: ${details}`);
      }
 
   } catch (error: any) {
     console.error("Error in /api/recommend:", error);
-    return NextResponse.json({ error: "Failed to generate recommendations.", details: error.message, source: error.stack }, { status: 500 });
+    const errorMessage = error.message || "An unknown error occurred";
+    return NextResponse.json({ error: "Failed to generate recommendations.", details: errorMessage, source: error.stack }, { status: 500 });
   }
 }
