@@ -1,4 +1,3 @@
-// Dish Genie: lib/telemetry.ts
 export async function pushLog(data: {
   message: string;
   level: 'info' | 'warn' | 'error';
@@ -8,6 +7,9 @@ export async function pushLog(data: {
   const projectId = process.env.INFRAGUARDIAN_PROJECT_ID;
 
   if (!url || !projectId) return;
+
+  // Move the log inside the function so it has access to 'url'
+  console.log("Sending log to:", `${url}/api/ingest`);
 
   try {
     await fetch(`${url}/api/ingest`, {
